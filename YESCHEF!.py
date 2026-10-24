@@ -1,34 +1,12 @@
-import cv2, numpy as np
+import cv2, numpy as np, pygame, math
 
-LOW, HIGH = np.array([18, 80, 80]), np.array([40, 255, 255])
-KERNEL = np.ones((5, 5), np.uint8)
-areas = []
-
-
-def detect(frame):
-    """Return (hand dict atau None, mask). hand["pinch"] True kalau bentuk tangan menyempit."""
-    mask = cv2.inRange(cv2.cvtColor(frame, cv2.COLOR_BGR2HSV), LOW, HIGH)
-    mask = cv2.morphologyEx(cv2.morphologyEx(mask, cv2.MORPH_OPEN, KERNEL), cv2.MORPH_CLOSE, KERNEL)
-    cnts, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    if not cnts:
-        return None, mask
-    c = max(cnts, key=cv2.contourArea)
-    area = cv2.contourArea(c)
-    M = cv2.moments(c)
-    if area < 800 or M["m00"] == 0:
-        return None, mask
-
-    hull = cv2.contourArea(cv2.convexHull(c))
-    solidity = area / hull if hull else 1
-    areas.append(area)
-    del areas[:-15]
-    ratio = area / (np.mean(areas) + 1)
-    pinch = len(areas) >= 5 and 0.65 < ratio < 1.10 and solidity > 0.60
-
-    hand = dict(x=int(M["m10"] / M["m00"]), y=int(M["m01"] / M["m00"]), bbox=cv2.boundingRect(c),
-                area=area, solidity=solidity, pinch=pinch, contour=c)
-    return hand, mask
-
+pygame.init()
+W, H = 1280, 720
+screen = pygame.display.set_mode((W, H))
+pygame.display.set_caption("Cooking Color - V4")
+clock = pygame.time.Clock()
+SMALL = pygame.font.SysFont("arial", 20)
+WHITE, YELLOW = (255, 255, 255), (255, 215, 50)
 
 cap = cv2.VideoCapture(0)
 cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
@@ -36,26 +14,76 @@ cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
 if not cap.isOpened():
     raise SystemExit("Kamera tidak dapat dibuka.")
 
-while True:
+LOW, HIGH = np.array([18, 80, 80]), np.array([40, 255, 255])
+KERNEL = np.ones((5, 5), np.uint8)
+areas = []
+
+items = [dict(name=n, color=c, x=x, y=300)
+         for n, c, x in (("EGG", (255, 245, 220), 170), ("TOMATO", (220, 70, 70), 300), ("CHEESE", (255, 190, 40), 430))]
+holding = None
+
+
+def detect(frame):
+    """Return (x, y, pinch) dalam koordinat kamera, atau None."""
+    mask = cv2.inRange(cv2.cvtColor(frame, cv2.COLOR_BGR2HSV), LOW, HIGH)
+    mask = cv2.morphologyEx(cv2.morphologyEx(mask, cv2.MORPH_OPEN, KERNEL), cv2.MORPH_CLOSE, KERNEL)
+    cnts, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not cnts:
+        return None
+    c = max(cnts, key=cv2.contourArea)
+    area = cv2.contourArea(c)
+    M = cv2.moments(c)
+    if area < 800 or M["m00"] == 0:
+        return None
+    hull = cv2.contourArea(cv2.convexHull(c))
+    areas.append(area)
+    del areas[:-15]
+    ratio = area / (np.mean(areas) + 1)
+    pinch = len(areas) >= 5 and 0.65 < ratio < 1.10 and (area / hull if hull else 1) > 0.60
+    return M["m10"] / M["m00"], M["m01"] / M["m00"], pinch
+
+
+running = True
+while running:
+    for e in pygame.event.get():
+        if e.type == pygame.QUIT or (e.type == pygame.KEYDOWN and e.key == pygame.K_ESCAPE):
+            running = False
+
     ok, frame = cap.read()
     if not ok:
-        break
-    frame = cv2.flip(frame, 1)
-    hand, mask = detect(frame)
+        continue
+    frame = cv2.flip(frame, 1)  # sudah mirror, jadi langsung diskalakan ke layar
+    r = detect(frame)
+    hand = (int(r[0] / frame.shape[1] * W), int(r[1] / frame.shape[0] * H)) if r else None
+    pinch = bool(r and r[2])
 
+    # --- logika
     if hand:
-        x, y, w, h = hand["bbox"]
-        color = (0, 255, 255) if hand["pinch"] else (0, 255, 0)
-        cv2.drawContours(frame, [hand["contour"]], -1, color, 2)
-        cv2.rectangle(frame, (x, y), (x + w, y + h), (255, 0, 0), 2)
-        cv2.circle(frame, (hand["x"], hand["y"]), 8, (0, 0, 255), -1)
-        cv2.putText(frame, f"{'PINCH' if hand['pinch'] else 'HAND'} solidity={hand['solidity']:.2f}",
-                    (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+        if holding is None:
+            if pinch:
+                for it in items:
+                    if math.dist(hand, (it["x"], it["y"])) < 80:
+                        holding = it
+                        break
+        elif pinch:
+            holding["x"], holding["y"] = hand
+        else:
+            holding = None
 
-    cv2.imshow("Kamera", frame)
-    cv2.imshow("Mask kuning", mask)
-    if cv2.waitKey(1) & 0xFF == 27:
-        break
+    # --- draw
+    screen.fill((250, 230, 205))
+    pygame.draw.rect(screen, (190, 130, 85), (0, 470, W, 250))
+    for it in items:
+        x, y = int(it["x"]), int(it["y"])
+        pygame.draw.circle(screen, (100, 70, 60), (x + 5, y + 8), 48)
+        pygame.draw.circle(screen, it["color"], (x, y), 45)
+        lbl = SMALL.render(it["name"], True, (45, 40, 50))
+        screen.blit(lbl, (x - lbl.get_width() // 2, y + 55))
+    if hand:
+        pygame.draw.circle(screen, YELLOW, hand, 18, 4)
+        screen.blit(SMALL.render("PINCH" if pinch else "HAND", True, (45, 40, 50)), (hand[0] + 25, hand[1] - 15))
+    pygame.display.flip()
+    clock.tick(60)
 
 cap.release()
-cv2.destroyAllWindows()
+pygame.quit()
